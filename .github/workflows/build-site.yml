@@ -1,0 +1,31 @@
+name: Build site from parts
+
+on:
+  push:
+    branches: [main]
+    paths: ['parts/**']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-site
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble index.html
+        run: cat parts/index.*.part > index.html
+
+      - name: Commit built site
+        run: |
+          git config user.name "karma-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add index.html
+          git commit -m "Build index.html from source parts" || echo "No changes to commit"
+          git push
