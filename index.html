@@ -790,3 +790,173 @@ function viewUpload(){
       <div class="field" id="noteField" style="display:none"><label>Note content *</label><textarea id="upNote" style="min-height:200px" placeholder="Write your note here… (line breaks are preserved)"></textarea></div>
       <div class="progress" id="progWrap" style="display:none"><div id="progBar"></div></div>
       <button class="btn" type="submit" id="upSubmit" style="padding:12px 30px">Publish</button>
+      <div class="form-msg" id="upMsg"></div>
+    </form>
+  </div>`;
+
+  let chosenFile = null;
+  const zone = ()=> $('#fileZone');
+
+  function renderZone(){
+    if (uploadType === 'note'){
+      zone().innerHTML = `<div class="dropzone" style="cursor:default"><div class="big">📝</div><b>Text note</b><br>Write your content below — it will appear as a beautiful readable note card.</div>`;
+      $('#noteField').style.display=''; $('#descField').style.display='none';
+      return;
+    }
+    $('#noteField').style.display='none'; $('#descField').style.display='';
+    const accept = uploadType === 'video' ? 'video/*' : 'image/*';
+    const big = uploadType === 'video' ? '🎬' : '🖼️';
+    const label = uploadType === 'video' ? 'Click to choose a video file' : 'Click to choose an image';
+    zone().innerHTML = `<div class="dropzone" id="dz">
+      <div class="big">${big}</div>
+      <b>${chosenFile ? esc(chosenFile.name) : label}</b><br>
+      <span style="font-size:12.5px">${chosenFile ? (fmtNum(Math.round(chosenFile.size/1024)) + ' KB') : (uploadType==='video' ? 'MP4, WebM… (up to ~50 MB on the free plan)' : 'JPG, PNG, GIF, WebP…')}</span>
+    </div><input type="file" id="fileInput" accept="${accept}" style="display:none">`;
+    $('#dz').onclick = ()=> $('#fileInput').click();
+    const input = $('#fileInput');
+    input.onchange = ()=> { chosenFile = input.files[0]; renderZone(); };
+    const dz = $('#dz');
+    dz.ondragover = e=>{ e.preventDefault(); dz.classList.add('over'); };
+    dz.ondragleave = ()=> dz.classList.remove('over');
+    dz.ondrop = e=>{ e.preventDefault(); dz.classList.remove('over'); if (e.dataTransfer.files[0]) { chosenFile = e.dataTransfer.files[0]; renderZone(); } };
+  }
+  renderZone();
+
+  document.querySelectorAll('#typeTabs .tab').forEach(t=>{
+    t.onclick = ()=>{
+      document.querySelectorAll('#typeTabs .tab').forEach(x=>x.classList.remove('active'));
+      t.classList.add('active'); uploadType = t.dataset.type; chosenFile = null; renderZone();
+    };
+  });
+
+  $('#uploadForm').onsubmit = async e=>{
+    e.preventDefault();
+    const msg = $('#upMsg'); msg.className='form-msg';
+    const title = $('#upTitle').value.trim();
+    if (!title) return;
+    if (uploadType !== 'note' && !chosenFile){ msg.className='form-msg err'; msg.textContent = 'Please choose a file.'; return; }
+    if (uploadType === 'note' && !$('#upNote').value.trim()){ msg.className='form-msg err'; msg.textContent = 'Please write your note.'; return; }
+    if (chosenFile && chosenFile.size > 60 * 1024 * 1024){ msg.className='form-msg err'; msg.textContent = 'File is larger than 60 MB — please choose a smaller file.'; return; }
+
+    const btn = $('#upSubmit'); btn.disabled = true; btn.textContent = 'Publishing…';
+    $('#progWrap').style.display = '';
+    try{
+      const post = { owner: me.id, type: uploadType, title };
+      if (uploadType === 'note'){
+        post.content = $('#upNote').value.trim();
+        if ($('#upDesc').value.trim()) post.description = $('#upDesc').value.trim();
+      } else {
+        post.description = $('#upDesc').value.trim() || null;
+        const safeName = chosenFile.name.replace(/[^\w.\-]/g,'_');
+        const path = `${me.id}/${Date.now()}-${safeName}`;
+        const opts = { cacheControl:'3600', upsert:false };
+        if (typeof opts === 'object' && chosenFile.type) opts.contentType = chosenFile.type;
+        const up = await sb.storage.from('media').upload(path, chosenFile, opts);
+        if (up.error) throw up.error;
+        post.media_url = sb.storage.from('media').getPublicUrl(path).data.publicUrl;
+        if (uploadType === 'video'){
+          btn.textContent = 'Generating thumbnail…';
+          const blob = await captureThumb(chosenFile);
+          if (blob){
+            const tpath = path + '.jpg';
+            const tUp = await sb.storage.from('media').upload(tpath, blob, { contentType:'image/jpeg' });
+            if (!tUp.error) post.thumb_url = sb.storage.from('media').getPublicUrl(tpath).data.publicUrl;
+          }
+          $('#progBar').style.width = '100%';
+        }
+      }
+      const ins = await sb.from('posts').insert(post).select('id').single();
+      if (ins.error) throw ins.error;
+      toast('Published! 🎉');
+      location.hash = '#/post?id=' + ins.data.id;
+    }catch(err){
+      msg.className='form-msg err'; msg.textContent = err.message || 'Upload failed. Please try again.';
+      btn.disabled = false; btn.textContent = 'Publish';
+      $('#progWrap').style.display = 'none';
+    }
+  };
+}
+
+async function captureThumb(file){
+  return new Promise(resolve=>{
+    let done = false; const finish = b => { if (!done){ done = true; resolve(b); } };
+    try{
+      const v = document.createElement('video');
+      v.preload = 'metadata'; v.muted = true; v.playsInline = true;
+      v.src = URL.createObjectURL(file);
+      v.onloadeddata = ()=>{ try{ v.currentTime = Math.min(1, (v.duration||2)/2); }catch(e){ finish(null); } };
+      v.onseeked = ()=>{
+        try{
+          const c = document.createElement('canvas');
+          const w = Math.min(640, v.videoWidth || 640);
+          c.width = w; c.height = Math.round(w * ((v.videoHeight||360)/(v.videoWidth||640)));
+          c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+          c.toBlob(b => finish(b), 'image/jpeg', 0.82);
+        }catch(e){ finish(null); }
+      };
+      v.onerror = ()=> finish(null);
+      setTimeout(()=>finish(null), 10000);
+    }catch(e){ finish(null); }
+  });
+}
+
+/* ---------- SETTINGS ---------- */
+function viewSettings(){
+  main().innerHTML = `
+  <div style="max-width:640px;margin:0 auto">
+    <div class="page-title">Channel settings</div>
+    <form class="form-card" style="margin:0;max-width:none" id="settingsForm">
+      <div style="display:flex;gap:18px;align-items:center;margin-bottom:18px;flex-wrap:wrap">
+        <div style="text-align:center">
+          ${avatarHTML(myProfile, 84)}
+          <label class="btn ghost sm" style="margin-top:10px;cursor:pointer">Change avatar
+            <input type="file" id="avatarInput" accept="image/*" style="display:none"></label>
+        </div>
+        <div style="flex:1;min-width:220px">
+          <div class="field"><label>Channel name</label><input id="setName" value="${esc(myProfile?.name||'')}" maxlength="60" required></div>
+          <div class="field"><label>Handle (a-z, 0-9, _)</label><input id="setHandle" value="${esc(myProfile?.handle||'')}" pattern="[a-z0-9_]{3,20}" required></div>
+        </div>
+      </div>
+      <div class="field"><label>Bio</label><textarea id="setBio" maxlength="300" placeholder="Tell viewers about your channel">${esc(myProfile?.bio||'')}</textarea></div>
+      <label class="btn ghost sm" style="cursor:pointer;margin-bottom:18px;display:inline-flex">Change banner image
+        <input type="file" id="bannerInput" accept="image/*" style="display:none"></label>
+      <button class="btn" type="submit">Save changes</button>
+      <div class="form-msg" id="setMsg"></div>
+    </form>
+  </div>`;
+
+  let avatarFile = null, bannerFile = null;
+  $('#avatarInput').onchange = e => { avatarFile = e.target.files[0]; if (avatarFile) toast('Avatar ready — click Save'); };
+  $('#bannerInput').onchange = e => { bannerFile = e.target.files[0]; if (bannerFile) toast('Banner ready — click Save'); };
+
+  $('#settingsForm').onsubmit = async e=>{
+    e.preventDefault();
+    const msg = $('#setMsg'); msg.className='form-msg';
+    const handle = $('#setHandle').value.trim().toLowerCase();
+    if (!/^[a-z0-9_]{3,20}$/.test(handle)){ msg.className='form-msg err'; msg.textContent='Handle must be 3–20 characters: a-z, 0-9, underscore.'; return; }
+    const updates = {
+      name: $('#setName').value.trim(),
+      handle,
+      bio: $('#setBio').value.trim() || null,
+    };
+    try{
+      for (const [key, file] of [['avatar', avatarFile], ['banner', bannerFile]]){
+        if (!file) continue;
+        if (file.size > 5*1024*1024) throw new Error('Images must be under 5 MB');
+        const path = `${me.id}/${key}-${Date.now()}.jpg`;
+        const up = await sb.storage.from('media').upload(path, file);
+        if (up.error) throw up.error;
+        updates[key + '_url'] = sb.storage.from('media').getPublicUrl(path).data.publicUrl;
+      }
+      const { error } = await sb.from('profiles').update(updates).eq('id', me.id);
+      if (error) throw error;
+      await loadMyProfile();
+      renderUserMenu();
+      msg.className='form-msg ok'; msg.textContent='Saved!';
+      toast('Channel updated');
+    }catch(err){ msg.className='form-msg err'; msg.textContent = err.message; }
+  };
+}
+</script>
+</body>
+</html>
