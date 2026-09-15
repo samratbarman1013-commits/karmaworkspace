@@ -1,0 +1,252 @@
+  main().innerHTML = skeletonFeed(2);
+  const { data: p, error } = await sb.from('posts').select(POST_SELECT).eq('id', id).maybeSingle();
+  if (error || !p) { main().innerHTML = errorState(error || {message:'Post not found'}); return; }
+  p.like_count = p.likes?.[0]?.count || 0; p.comment_count = p.comments?.[0]?.count || 0;
+
+  const likedSet = await fetchMyLikes([p.id]);
+  const liked = likedSet.has(p.id);
+  const isNote = p.type === 'note';
+
+  let media;
+  if (p.type === 'video'){
+    media = `<div class="player"><video controls playsinline preload="metadata" ${p.thumb_url ? `poster="${esc(p.thumb_url)}"` : ''} src="${esc(p.media_url)}"></video></div>`;
+  } else if (p.type === 'image'){
+    media = `<div class="player"><img src="${esc(p.media_url)}" alt="${esc(p.title)}"></div>`;
+  } else {
+    media = `<div class="note-card">
+      <div style="font-size:12px;color:var(--text2);margin-bottom:10px">${ICONS.note} Note by ${esc(p.profiles?.name||'')}</div>
+      <div class="note-body">${esc(p.content || p.description || '')}</div>
+    </div>`;
+  }
+
+  main().innerHTML = `
+  <div class="post-wrap">
+    ${media}
+    <h1 class="post-title">${esc(p.title)}</h1>
+    ${p.description && !isNote ? `<div class="card-sub" style="margin-bottom:6px;white-space:pre-wrap">${esc(p.description)}</div>` : ''}
+    <div class="post-stats">
+      <a href="#/channel?id=${p.owner}" style="display:flex;align-items:center;gap:8px;color:var(--text);font-weight:600">
+        ${avatarHTML(p.profiles, 26)} ${esc(p.profiles?.name || 'Unknown')}
+      </a>
+      <span class="dot">•</span> ${timeAgo(p.created_at)}
+    </div>
+    <div class="actionbar">
+      <button class="act ${liked?'liked':''}" id="likeBtn">${liked?ICONS.heart:ICONS.heartO} <span id="likeCount">${fmtNum(p.like_count)}</span></button>
+      <button class="act" id="commentBtn">${ICONS.comment} <span>${fmtNum(p.comment_count)}</span></button>
+      <button class="act" id="shareBtn">${ICONS.share} Share</button>
+    </div>
+    <div class="comments">
+      <h3 id="commentsTitle">Comments</h3>
+      <div id="commentForm">${ me ? `
+        <div class="cbox">
+          ${avatarHTML(myProfile, 38)}
+          <div class="cinput">
+            <textarea id="commentText" placeholder="Add a comment…" rows="2"></textarea>
+            <div style="text-align:right;margin-top:8px"><button class="btn sm" id="commentSubmit">Comment</button></div>
+          </div>
+        </div>` : `<p class="card-sub" style="margin-bottom:16px"><a href="#/auth" style="color:var(--accent);font-weight:600">Sign in</a> to join the conversation.</p>` }
+      </div>
+      <div id="commentList"></div>
+    </div>
+  </div>`;
+
+  // like
+  $('#likeBtn').onclick = async ()=>{
+    if (!me) return toast('Sign in to like posts');
+    const btn = $('#likeBtn');
+    const nowLiked = !btn.classList.contains('liked');
+    btn.classList.toggle('liked', nowLiked);
+    $('#likeCount').textContent = fmtNum(p.like_count + (nowLiked ? 1 : -1));
+    if (nowLiked){ const { error } = await sb.from('likes').insert({ post_id:p.id, user_id:me.id }); if (error){ btn.classList.remove('liked'); $('#likeCount').textContent = fmtNum(p.like_count); toast(error.message); } else p.like_count++; }
+    else { const { error } = await sb.from('likes').delete().match({ post_id:p.id, user_id:me.id }); if (error){ btn.classList.add('liked'); $('#likeCount').textContent = fmtNum(p.like_count); } else p.like_count--; }
+  };
+  $('#commentBtn').onclick = ()=> document.querySelector('.comments').scrollIntoView({behavior:'smooth'});
+  // share
+  $('#shareBtn').onclick = async ()=>{
+    const url = location.origin + location.pathname + '#/post?id=' + p.id;
+    if (navigator.share){ try { await navigator.share({ title:p.title, url }); return; } catch(e){ if (e.name === 'AbortError') return; } }
+    try { await navigator.clipboard.writeText(url); toast('Link copied — share it anywhere!'); }
+    catch(e){ prompt('Copy this link:', url); }
+  };
+  // comments
+  async function loadComments(){
+    const { data: comments, error } = await sb.from('comments')
+      .select('id,text,created_at,profiles!comments_user_id_fkey(id,handle,name,avatar_url)')
+      .eq('post_id', p.id).order('created_at', { ascending:true });
+    if (error) return toast(error.message);
+    $('#commentsTitle').textContent = `Comments (${comments.length})`;
+    $('#commentList').innerHTML = comments.length ? comments.map(c=>`
+      <div class="comment">
+        ${avatarHTML(c.profiles, 38)}
+        <div class="cbody">
+          <div class="chead"><b onclick="location.hash='#/channel?id=${c.profiles?.id||''}'">${esc(c.profiles?.name||'User')}</b> · @${esc(c.profiles?.handle||'')} · ${timeAgo(c.created_at)}</div>
+          <div class="ctext">${esc(c.text)}</div>
+        </div>
+      </div>`).join('') : `<p class="card-sub">No comments yet. Start the conversation!</p>`;
+  }
+  const submit = document.getElementById('commentSubmit');
+  if (submit) submit.onclick = async ()=>{
+    const text = $('#commentText').value.trim();
+    if (!text) return;
+    submit.disabled = true;
+    const { error } = await sb.from('comments').insert({ post_id:p.id, user_id:me.id, text });
+    submit.disabled = false;
+    if (error) return toast(error.message);
+    $('#commentText').value = '';
+    p.comment_count++;
+    loadComments();
+  };
+  loadComments();
+}
+
+/* ---------- CHANNEL ---------- */
+async function viewChannel(id){
+  main().innerHTML = skeletonFeed(4);
+  const { data: ch, error } = await sb.from('profiles').select('*').eq('id', id).maybeSingle();
+  if (error || !ch) { main().innerHTML = errorState(error || {message:'Channel not found'}); return; }
+  const [{ count: followers }, { count: postCount }] = await Promise.all([
+    sb.from('follows').select('*', { count:'exact', head:true }).eq('channel_id', id),
+    sb.from('posts').select('*', { count:'exact', head:true }).eq('owner', id),
+  ]);
+  let followed = false;
+  if (me && me.id !== id){
+    const { count } = await sb.from('follows').select('*', { count:'exact', head:true }).eq('channel_id', id).eq('follower_id', me.id);
+    followed = count > 0;
+  }
+  const posts = await fetchPosts({ ownerId:id });
+
+  const own = me && me.id === id;
+  main().innerHTML = `
+  <div class="channel-head">
+    <div class="banner">${ch.banner_url ? `<img src="${esc(ch.banner_url)}" alt="">` : ''}</div>
+    <div class="ch-row">
+      ${avatarHTML(ch, 96)}
+      <div class="ch-info">
+        <h1>${esc(ch.name)}</h1>
+        <div class="hnd">@${esc(ch.handle)} · ${fmtNum(followers||0)} followers · ${fmtNum(postCount||0)} posts</div>
+        ${ch.bio ? `<div class="bio">${esc(ch.bio)}</div>` : ''}
+      </div>
+      <div class="ch-btns">
+        ${own
+          ? `<a class="btn ghost" href="#/settings">Customize channel</a>`
+          : me ? `<button class="btn ${followed?'ghost':''}" id="followBtn">${followed ? 'Following ✓' : '+ Follow'}</button>`
+               : `<a class="btn" href="#/auth">Follow</a>`}
+      </div>
+    </div>
+  </div>
+  ${posts.length
+    ? `<div class="feed">${(await (async ()=>{ const liked = await fetchMyLikes(posts.map(p=>p.id)); return posts.map(p=>cardHTML(p, liked.has(p.id))).join(''); })())}</div>`
+    : emptyState('No posts yet', own ? 'Upload your first video, note or image!' : 'This channel has not posted anything yet.')}
+
+  ${own ? `<div style="margin-top:26px;text-align:center"><a class="btn" href="#/upload">+ New post</a></div>` : ''}`;
+
+  const fb = document.getElementById('followBtn');
+  if (fb) fb.onclick = async ()=>{
+    const nowFollowed = fb.textContent.includes('+');
+    fb.disabled = true;
+    if (nowFollowed){
+      const { error } = await sb.from('follows').insert({ channel_id:id, follower_id:me.id });
+      if (!error){ fb.textContent = 'Following ✓'; fb.classList.add('ghost'); toast('Following ' + ch.name); }
+      else toast(error.message);
+    } else {
+      const { error } = await sb.from('follows').delete().match({ channel_id:id, follower_id:me.id });
+      if (!error){ fb.textContent = '+ Follow'; fb.classList.remove('ghost'); }
+      else toast(error.message);
+    }
+    fb.disabled = false;
+  };
+}
+
+/* ---------- SEARCH ---------- */
+async function viewSearch(q){
+  main().innerHTML = `<div class="page-title">Results for “${esc(q)}”</div>` + skeletonFeed(4);
+  const like = `%${q.replace(/[%_,()]/g,'')}%`;
+  const [postRes, chRes] = await Promise.all([
+    fetchPosts({ search: q.replace(/[%_,]/g,'') }),
+    sb.from('profiles').select('id,handle,name,avatar_url,bio').or(`name.ilike.${like},handle.ilike.${like}`).limit(10),
+  ]);
+  const channels = chRes.data || [];
+  let html = `<div class="page-title">Results for “${esc(q)}”</div>`;
+  if (channels.length){
+    html += `<h3 style="font-size:15px;margin:4px 0 10px">Channels</h3>` + channels.map(c=>`
+      <div class="result-ch" onclick="location.hash='#/channel?id=${c.id}'">
+        ${avatarHTML(c, 56)}
+        <div><b style="font-size:15px">${esc(c.name)}</b>
+        <div class="card-sub">@${esc(c.handle)}${c.bio ? ' · ' + esc(c.bio.slice(0,80)) : ''}</div></div>
+      </div>`).join('') + `<h3 style="font-size:15px;margin:20px 0 10px">Posts</h3>`;
+  }
+  if (postRes.length){
+    const liked = await fetchMyLikes(postRes.map(p=>p.id));
+    html += `<div class="feed">${postRes.map(p=>cardHTML(p, liked.has(p.id))).join('')}</div>`;
+  } else {
+    html += emptyState('No results', `Nothing matches “${esc(q)}”. Try different words.`);
+  }
+  main().innerHTML = html;
+}
+
+/* ---------- AUTH ---------- */
+function viewAuth(){
+  main().innerHTML = `
+  <div class="form-card">
+    <h1 id="authTitle">Welcome back</h1>
+    <div class="sub" id="authSub">Sign in to your KarmaWorkspace channel</div>
+    <form id="loginForm">
+      <div class="field"><label>Email</label><input type="email" id="loginEmail" required placeholder="you@example.com"></div>
+      <div class="field"><label>Password</label><input type="password" id="loginPass" required minlength="6" placeholder="••••••••"></div>
+      <button class="btn" style="width:100%" type="submit">Sign in</button>
+      <div class="form-msg" id="authMsg"></div>
+      <div class="sub" style="text-align:center;margin-top:14px">New here? <a href="javascript:void(0)" id="toSignup" style="color:var(--accent);font-weight:700">Create a channel</a></div>
+    </form>
+    <form id="signupForm" style="display:none">
+      <div class="field"><label>Your name / channel name</label><input type="text" id="suName" required maxlength="60" placeholder="e.g. Samrat Explains"></div>
+      <div class="field"><label>Email</label><input type="email" id="suEmail" required placeholder="you@example.com"></div>
+      <div class="field"><label>Password</label><input type="password" id="suPass" required minlength="6" placeholder="At least 6 characters"></div>
+      <button class="btn" style="width:100%" type="submit">Create my channel</button>
+      <div class="form-msg" id="suMsg"></div>
+      <div class="sub" style="text-align:center;margin-top:14px">Already have one? <a href="javascript:void(0)" id="toLogin" style="color:var(--accent);font-weight:700">Sign in</a></div>
+    </form>
+  </div>`;
+
+  $('#toSignup').onclick = ()=>{ $('#loginForm').style.display='none'; $('#signupForm').style.display='block'; $('#authTitle').textContent='Create your channel'; $('#authSub').textContent='Join KarmaWorkspace — share videos, notes and images'; };
+  $('#toLogin').onclick  = ()=>{ $('#signupForm').style.display='none'; $('#loginForm').style.display='block'; $('#authTitle').textContent='Welcome back'; $('#authSub').textContent='Sign in to your KarmaWorkspace channel'; };
+
+  $('#loginForm').onsubmit = async e=>{
+    e.preventDefault();
+    const msg = $('#authMsg'); msg.className='form-msg';
+    const { error } = await sb.auth.signInWithPassword({ email:$('#loginEmail').value.trim(), password:$('#loginPass').value });
+    if (error){ msg.className='form-msg err'; msg.textContent = error.message; return; }
+    location.hash = '#/'; toast('Welcome back!');
+  };
+  $('#signupForm').onsubmit = async e=>{
+    e.preventDefault();
+    const msg = $('#suMsg'); msg.className='form-msg';
+    const name = $('#suName').value.trim();
+    const { data, error } = await sb.auth.signUp({
+      email: $('#suEmail').value.trim(),
+      password: $('#suPass').value,
+      options: { data: { name } }
+    });
+    if (error){ msg.className='form-msg err'; msg.textContent = error.message; return; }
+    if (data.session){ location.hash='#/'; toast('Channel created. Welcome, ' + name + '!'); }
+    else { msg.className='form-msg ok'; msg.textContent = 'Account created! Please check your email to confirm, then sign in.'; }
+  };
+}
+
+/* ---------- UPLOAD ---------- */
+function viewUpload(){
+  let uploadType = 'video';
+  main().innerHTML = `
+  <div style="max-width:720px;margin:0 auto">
+    <div class="page-title">Create a post</div>
+    <div class="tabs" id="typeTabs">
+      <button class="tab active" data-type="video">${ICONS.video} Video</button>
+      <button class="tab" data-type="image">${ICONS.image} Image</button>
+      <button class="tab" data-type="note">${ICONS.note} Note</button>
+    </div>
+    <form id="uploadForm">
+      <div id="fileZone" style="margin-bottom:15px"></div>
+      <div class="field"><label>Title *</label><input id="upTitle" required maxlength="120" placeholder="Give your post a title"></div>
+      <div class="field" id="descField"><label>Description</label><textarea id="upDesc" maxlength="2000" placeholder="Tell viewers about it (optional)"></textarea></div>
+      <div class="field" id="noteField" style="display:none"><label>Note content *</label><textarea id="upNote" style="min-height:200px" placeholder="Write your note here… (line breaks are preserved)"></textarea></div>
+      <div class="progress" id="progWrap" style="display:none"><div id="progBar"></div></div>
+      <button class="btn" type="submit" id="upSubmit" style="padding:12px 30px">Publish</button>
