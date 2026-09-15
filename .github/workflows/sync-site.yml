@@ -1,0 +1,31 @@
+name: Sync site from release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME:-$(gh release list -L 1 --json tagName -q '.[0].tagName')}"
+          echo "Syncing site files from release $TAG"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --clobber --dir .
+
+      - name: Commit site files to main
+        run: |
+          git config user.name "karma-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "Site update from release" || echo "No changes to commit"
+          git push
